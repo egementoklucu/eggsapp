@@ -140,7 +140,32 @@
             box-shadow: 0 0 0 3px var(--primary-light);
         }
 
-        .auth-card button {
+        .password-input-container {
+            position: relative;
+            display: flex;
+            align-items: center;
+        }
+
+        .password-toggle-btn {
+            position: absolute;
+            right: 12px;
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 1rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            transition: color 0.2s;
+        }
+
+        .password-toggle-btn:hover {
+            color: var(--primary);
+        }
+
+        .auth-card button.submit-btn {
             width: 100%;
             background: var(--primary);
             color: white;
@@ -154,7 +179,7 @@
             margin-top: 1rem;
         }
 
-        .auth-card button:hover {
+        .auth-card button.submit-btn:hover {
             background: var(--primary-hover);
             transform: translateY(-2px);
         }
@@ -995,12 +1020,29 @@
                     <input type="text" id="auth-username" class="form-control" placeholder="örn: egg_master">
                 </div>
 
+                <!-- Şifre Alanı (Göz Butonlu) -->
                 <div class="form-group">
                     <label for="auth-password">Şifre</label>
-                    <input type="password" id="auth-password" class="form-control" placeholder="••••••••">
+                    <div class="password-input-container">
+                        <input type="password" id="auth-password" class="form-control" placeholder="••••••••">
+                        <button type="button" class="password-toggle-btn" onclick="togglePasswordVisibility('auth-password', this)">
+                            <i class="fa-solid fa-eye"></i>
+                        </button>
+                    </div>
                 </div>
 
-                <button id="auth-submit-btn" onclick="handleAuthSubmit()">Giriş Yap</button>
+                <!-- Şifre Tekrar Alanı (Sadece Kayıtta Gösterilecek, Göz Butonlu) -->
+                <div class="form-group" id="auth-confirm-password-group" style="display: none;">
+                    <label for="auth-confirm-password">Şifre Tekrar</label>
+                    <div class="password-input-container">
+                        <input type="password" id="auth-confirm-password" class="form-control" placeholder="••••••••">
+                        <button type="button" class="password-toggle-btn" onclick="togglePasswordVisibility('auth-confirm-password', this)">
+                            <i class="fa-solid fa-eye"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <button id="auth-submit-btn" class="submit-btn" onclick="handleAuthSubmit()">Giriş Yap</button>
 
                 <div class="auth-toggle">
                     <span id="auth-toggle-text">Hesabınız yok mu? <span onclick="toggleAuthMode(true)">Kayıt Olun</span></span>
@@ -1192,6 +1234,7 @@
         let activeChatUsername = null;
         let isRegistering = false;
         let showEncryptedDebug = false;
+        let isSigningUp = false; // Flag to resolve Auth/Firestore registration race conditions
 
         // Hardware audio states
         let mediaRecorder = null;
@@ -1213,6 +1256,8 @@
 
         // Track Authentication State Changes from Firebase
         auth.onAuthStateChanged(async (firebaseUser) => {
+            if (isSigningUp) return; // If signing up, register flow will handle UI transition themselves
+
             if (firebaseUser) {
                 // Recover username from hidden email: name@eggsapp.local -> name
                 const username = firebaseUser.email.split('@')[0];
@@ -1229,8 +1274,16 @@
 
                     showAppInterface();
                 } else {
-                    // Safety fallback if Firestore document is missing
-                    logout();
+                    // Try waiting briefly in case Firestore doc is being written in registration flow
+                    setTimeout(async () => {
+                        const checkAgain = await db.collection("users").doc(username).get();
+                        if (checkAgain.exists) {
+                            currentUser = checkAgain.data();
+                            showAppInterface();
+                        } else {
+                            logout();
+                        }
+                    }, 1500);
                 }
             } else {
                 currentUser = null;
@@ -1239,6 +1292,19 @@
             }
         });
 
+        // --- PASSWORD VISIBILITY TOGGLE ---
+        function togglePasswordVisibility(inputId, btn) {
+            const input = document.getElementById(inputId);
+            const icon = btn.querySelector('i');
+            if (input.type === 'password') {
+                input.type = 'text';
+                icon.className = 'fa-solid fa-eye-slash';
+            } else {
+                input.type = 'password';
+                icon.className = 'fa-solid fa-eye';
+            }
+        }
+
         // --- AUTH CONTROLS ---
         function toggleAuthMode(regMode) {
             isRegistering = regMode;
@@ -1246,16 +1312,29 @@
             const toggleText = document.getElementById('auth-toggle-text');
             const submitBtn = document.getElementById('auth-submit-btn');
             const avatarSec = document.getElementById('auth-avatar-section');
+            const confirmPassGroup = document.getElementById('auth-confirm-password-group');
+
+            // Reset password field types to secret and toggle buttons to show eye
+            document.getElementById('auth-password').type = 'password';
+            document.getElementById('auth-confirm-password').type = 'password';
+            document.querySelectorAll('.password-toggle-btn i').forEach(i => i.className = 'fa-solid fa-eye');
+
+            // Clean inputs
+            document.getElementById('auth-username').value = '';
+            document.getElementById('auth-password').value = '';
+            document.getElementById('auth-confirm-password').value = '';
 
             if (isRegistering) {
                 title.innerText = 'EggsApp\'e Katıl';
                 submitBtn.innerText = 'Kayıt Ol';
                 avatarSec.style.display = 'flex';
+                confirmPassGroup.style.display = 'block';
                 toggleText.innerHTML = 'Zaten hesabınız var mı? <span onclick="toggleAuthMode(false)">Giriş Yapın</span>';
             } else {
                 title.innerText = 'EggsApp Giriş';
                 submitBtn.innerText = 'Giriş Yap';
                 avatarSec.style.display = 'none';
+                confirmPassGroup.style.display = 'none';
                 toggleText.innerHTML = 'Hesabınız yok mu? <span onclick="toggleAuthMode(true)">Kayıt Olun</span>';
             }
         }
@@ -1285,10 +1364,24 @@
             }
 
             if (isRegistering) {
+                const confirmPasswordInput = document.getElementById('auth-confirm-password').value;
+                if (passwordInput !== confirmPasswordInput) {
+                    showToast('Şifreler uyuşmuyor!');
+                    return;
+                }
+
+                if (passwordInput.length < 6) {
+                    showToast('Şifre en az 6 karakter olmalıdır!');
+                    return;
+                }
+
                 try {
+                    isSigningUp = true; // Block onAuthStateChanged check to avoid race condition
+                    
                     // Check if user already exists in Firestore users collection
                     const doc = await db.collection("users").doc(usernameInput).get();
                     if (doc.exists) {
+                        isSigningUp = false;
                         showToast('Bu kullanıcı adı alınmış!');
                         return;
                     }
@@ -1309,8 +1402,13 @@
                     };
 
                     await db.collection("users").doc(usernameInput).set(newUser);
+                    currentUser = newUser;
+                    
+                    isSigningUp = false; // Release the flag
                     showToast('Kayıt başarılı! EggsApp\'e hoş geldiniz.');
+                    showAppInterface();
                 } catch (err) {
+                    isSigningUp = false;
                     showToast('Hata: ' + err.message);
                 }
             } else {
@@ -1414,7 +1512,7 @@
                         const isUserDeleted = !targetUser;
                         const name = chatData.customName || (isUserDeleted ? '@' + chatData.targetUsername : targetUser.displayName);
                         const avatar = isUserDeleted ? 'https://images.unsplash.com/photo-1594751497333-2162607779f2?w=200' : targetUser.avatar;
-                        const lastMsgText = isUserDeleted ? "Bu kişi artık EggsApp kullanmıyor" : (chatData.lastMessage || "Sohbeti başlatın...");
+                        const lastMsgText = isUserDeleted ? "Bu kişi artık EggsApp kullanıyor" : (chatData.lastMessage || "Sohbeti başlatın...");
 
                         const chatItem = document.createElement('div');
                         chatItem.className = `chat-item ${activeChatUsername === chatData.targetUsername ? 'active' : ''}`;
@@ -1880,7 +1978,7 @@
             } else if (themeKey === 'neon') {
                 root.style.setProperty('--primary', '#a855f7');
                 root.style.setProperty('--primary-hover', '#9333ea');
-                root.style.setProperty('--primary-light', 'rgba(168, 85, 247, 0.1)');
+                root.style.setProperty('--primary-light', 'rgba(16, 185, 129, 0.1)');
                 root.style.setProperty('--bubble-me', '#a855f7');
                 document.getElementById('theme-neon').classList.add('active');
                 localStorage.setItem('eggs_theme_choice', 'neon');
@@ -2029,5 +2127,5 @@
             });
         }
     </script>
-</body>
+<script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a00d55794f9a3ec0',t:'MTc3OTYzNjU0NQ=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
