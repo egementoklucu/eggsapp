@@ -829,6 +829,8 @@
             box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3);
             transform: scale(0.9);
             transition: transform 0.3s;
+            overflow-y: auto;
+            max-height: 90vh;
         }
 
         .modal-overlay.active .modal-card {
@@ -1185,7 +1187,32 @@
                     <label>Profil Açıklaması (Durum)</label>
                     <input type="text" id="settings-about" class="form-control">
                 </div>
-                <button class="auth-card" style="margin-top: 1rem; padding: 0.6rem;" onclick="saveSettings()">Bilgileri Güncelle</button>
+                
+                <!-- ŞİFRE DEĞİŞTİRME ALANI -->
+                <div class="form-group" style="margin-top: 1.5rem; border-top: 1px solid var(--border-color); padding-top: 1.25rem;">
+                    <label style="color: var(--primary); font-weight: 700; font-size: 0.85rem; display: block; margin-bottom: 0.75rem;">Şifrenizi Değiştirin</label>
+                    <div class="password-input-container">
+                        <input type="password" id="settings-new-password" class="form-control" placeholder="Yeni şifrenizi girin">
+                        <button type="button" class="password-toggle-btn" onclick="togglePasswordVisibility('settings-new-password', this)">
+                            <i class="fa-solid fa-eye"></i>
+                        </button>
+                    </div>
+                    <button class="sim-btn" onclick="changeUserPassword()" style="width: 100%; margin-top: 0.75rem; border-color: var(--primary); color: var(--primary); font-weight: 600; padding: 0.6rem;">
+                        <i class="fa-solid fa-key"></i> Şifreyi Güncelle
+                    </button>
+                </div>
+
+                <!-- HESAP KONTROLLERİ (ÇIKIŞ & SİL) -->
+                <div style="margin-top: 1.5rem; border-top: 1px solid var(--border-color); padding-top: 1.25rem; display: flex; gap: 0.75rem;">
+                    <button class="sim-btn" onclick="closeModal('settings-modal'); logout();" style="flex: 1; border-color: #EF4444; color: #EF4444;">
+                        <i class="fa-solid fa-right-from-bracket"></i> Hesaptan Çık
+                    </button>
+                    <button class="sim-btn" onclick="deleteUserAccount()" style="flex: 1; background: rgba(239, 68, 68, 0.1); border-color: #EF4444; color: #EF4444;">
+                        <i class="fa-solid fa-trash-can"></i> Hesabı Kalıcı Sil
+                    </button>
+                </div>
+
+                <button class="auth-card" style="margin-top: 1.5rem; padding: 0.6rem;" onclick="saveSettings()">Değişiklikleri Kaydet</button>
             </div>
         </div>
 
@@ -1263,7 +1290,8 @@
                 const username = firebaseUser.email.split('@')[0];
                 
                 // Fetch details from Firestore database
-                const userDoc = await db.collection("users").doc(username).get();
+                let userDoc = await db.collection("users").doc(username).get();
+                
                 if (userDoc.exists) {
                     currentUser = userDoc.data();
                     
@@ -1274,16 +1302,27 @@
 
                     showAppInterface();
                 } else {
-                    // Try waiting briefly in case Firestore doc is being written in registration flow
-                    setTimeout(async () => {
-                        const checkAgain = await db.collection("users").doc(username).get();
-                        if (checkAgain.exists) {
-                            currentUser = checkAgain.data();
-                            showAppInterface();
-                        } else {
-                            logout();
-                        }
-                    }, 1500);
+                    // --- SELF-HEALING MECHANISM ---
+                    // If the user's Auth exists but their Firestore document does not (due to past broken tests/runs)
+                    // we automatically create the Firestore document on the fly so they can log in perfectly!
+                    const restoredUser = {
+                        username: username,
+                        displayName: username,
+                        avatar: defaultAvatars[0],
+                        about: 'EggsApp kullanıyorum!',
+                        lastActive: Date.now(),
+                        blockedUsers: []
+                    };
+                    
+                    try {
+                        await db.collection("users").doc(username).set(restoredUser);
+                        currentUser = restoredUser;
+                        showToast("Profiliniz onarıldı ve otomatik kurtarıldı! Giriş yapılıyor...");
+                        showAppInterface();
+                    } catch (err) {
+                        console.error("Self-healing failed (Check Firebase Firestore security rules!):", err);
+                        logout();
+                    }
                 }
             } else {
                 currentUser = null;
@@ -1419,6 +1458,49 @@
                     showToast('Başarıyla giriş yapıldı!');
                 } catch (err) {
                     showToast('Giriş başarısız: ' + err.message);
+                }
+            }
+        }
+
+        // --- PASSWORD UPDATE (SİFRE DEGİSTİRME) ---
+        async function changeUserPassword() {
+            const newPassword = document.getElementById('settings-new-password').value;
+            if (!newPassword) {
+                showToast("Lütfen yeni şifre girin!");
+                return;
+            }
+            if (newPassword.length < 6) {
+                showToast("Yeni şifre en az 6 karakter olmalıdır!");
+                return;
+            }
+
+            try {
+                const user = auth.currentUser;
+                await user.updatePassword(newPassword);
+                showToast("Şifreniz başarıyla değiştirildi!");
+                document.getElementById('settings-new-password').value = '';
+            } catch (err) {
+                showToast("Hata: " + err.message);
+            }
+        }
+
+        // --- DELETE ACCOUNT (HESABI SİLME) ---
+        async function deleteUserAccount() {
+            if (confirm("Hesabınızı kalıcı olarak silmek istediğinizden emin misiniz? Tüm mesajlarınız ve profiliniz silinecek! Bu işlem geri alınamaz!")) {
+                try {
+                    const username = currentUser.username;
+                    const user = auth.currentUser;
+
+                    // 1. Delete user from firestore database
+                    await db.collection("users").doc(username).delete();
+
+                    // 2. Delete auth credentials
+                    await user.delete();
+
+                    showToast("Hesabınız tamamen silindi.");
+                    logout();
+                } catch (err) {
+                    showToast("Silme hatası: Değişiklik güvenliği için tekrar giriş yapıp hemen ardından silmeyi denemelisiniz. " + err.message);
                 }
             }
         }
@@ -1978,7 +2060,7 @@
             } else if (themeKey === 'neon') {
                 root.style.setProperty('--primary', '#a855f7');
                 root.style.setProperty('--primary-hover', '#9333ea');
-                root.style.setProperty('--primary-light', 'rgba(16, 185, 129, 0.1)');
+                root.style.setProperty('--primary-light', 'rgba(168, 85, 247, 0.1)');
                 root.style.setProperty('--bubble-me', '#a855f7');
                 document.getElementById('theme-neon').classList.add('active');
                 localStorage.setItem('eggs_theme_choice', 'neon');
@@ -2025,6 +2107,7 @@
         function openSettingsModal() {
             document.getElementById('settings-about').value = currentUser.about || 'EggsApp kullanıyorum!';
             document.getElementById('settings-avatar-preview').style.backgroundImage = `url('${currentUser.avatar}')`;
+            document.getElementById('settings-new-password').value = '';
             document.getElementById('settings-modal').classList.add('active');
         }
 
@@ -2127,5 +2210,5 @@
             });
         }
     </script>
-<script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a00d55794f9a3ec0',t:'MTc3OTYzNjU0NQ=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+<script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a00db3ec3a96c546',t:'MTc3OTY0MDQxNA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
